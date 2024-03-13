@@ -1,6 +1,17 @@
 package com.instacart.library.truetime;
 
 import android.content.Context;
+import io.reactivex.BackpressureStrategy;
+import io.reactivex.Flowable;
+import io.reactivex.FlowableEmitter;
+import io.reactivex.FlowableOnSubscribe;
+import io.reactivex.FlowableTransformer;
+import io.reactivex.annotations.NonNull;
+import io.reactivex.functions.Consumer;
+import io.reactivex.functions.Function;
+import io.reactivex.functions.Predicate;
+import io.reactivex.schedulers.Schedulers;
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Arrays;
@@ -8,12 +19,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
-import java.util.concurrent.Callable;
-import rx.Observable;
-import rx.Observable.Transformer;
-import rx.functions.Action1;
-import rx.functions.Func1;
-import rx.schedulers.Schedulers;
+import org.reactivestreams.Publisher;
 
 public class TrueTimeRx
       extends TrueTime {
@@ -37,6 +43,21 @@ public class TrueTimeRx
         return this;
     }
 
+    public TrueTimeRx withRootDelayMax(float rootDelay) {
+        super.withRootDelayMax(rootDelay);
+        return this;
+    }
+
+    public TrueTimeRx withRootDispersionMax(float rootDispersion) {
+        super.withRootDispersionMax(rootDispersion);
+        return this;
+    }
+
+    public TrueTimeRx withServerResponseDelayMax(int serverResponseDelayInMillis) {
+        super.withServerResponseDelayMax(serverResponseDelayInMillis);
+        return this;
+    }
+
     public TrueTimeRx withLoggingEnabled(boolean isLoggingEnabled) {
         super.withLoggingEnabled(isLoggingEnabled);
         return this;
@@ -53,21 +74,19 @@ public class TrueTimeRx
      *
      * @return accurate NTP Date
      */
-    public Observable<Date> initializeRx(String ntpPool) {
-        return initializeNtp(ntpPool)//
-              .map(new Func1<long[], Date>() {
-                  @Override
-                  public Date call(long[] longs) {
-                      return now();
-                  }
-              });
-    }
+    public Flowable<Date> initializeRx(String ntpPoolAddress) {
+        return initializeNtp(ntpPoolAddress).map(new Function<long[], Date>() {
+            @Override
+            public Date apply(long[] longs) throws Exception {
+                return now();
+            }
+        });
+     }
 
     /**
      * Initialize TrueTime
      * A single NTP pool server is provided.
-     * Using DNS we resolve that to multiple IP hosts
-     * Against each IP host we issue a UDP call and retrieve the best response using the NTP algorithm
+     * Using DNS we resolve that to multiple IP hosts (See {@link #initializeNtp(List)} for manually resolved IPs)
      *
      * Use this instead of {@link #initializeRx(String)} if you wish to also get additional info for
      * instrumentation/tracking actual NTP response data
@@ -76,89 +95,135 @@ public class TrueTimeRx
      * @return Observable of detailed long[] containing most important parts of the actual NTP response
      * See RESPONSE_INDEX_ prefixes in {@link SntpClient} for details
      */
-    public Observable<long[]> initializeNtp(String ntpPool) {
-        return Observable//
-              .just(ntpPool)//
-              .compose(resolveNtpPoolToIpAddresses())//
-              .flatMap(bestResponseAgainstSingleIp(5))  // get best response from querying the ip 5 times
-              .take(5)                                  // take 5 of the best results
-              .toList()//
-              .map(filterMedianResponse())//
-              .doOnNext(new Action1<long[]>() {
-                  @Override
-                  public void call(long[] ntpResponse) {
-                      cacheTrueTimeInfo(ntpResponse);
-                      saveTrueTimeInfoToDisk();
-                  }
-              });
+    public Flowable<long[]> initializeNtp(String ntpPool) {
+        return Flowable
+              .just(ntpPool)
+              .compose(resolveNtpPoolToIpAddresses())
+              .compose(performNtpAlgorithm());
     }
 
-    private Transformer<String, String> resolveNtpPoolToIpAddresses() {
-        return new Transformer<String, String>() {
+    /**
+     * Initialize TrueTime
+     * Use this if you want to resolve the NTP Pool address to individual IPs yourself
+     *
+     * See https://github.com/instacart/truetime-android/issues/42
+     * to understand why you may want to do something like this.
+     *
+     * @param resolvedNtpAddresses list of resolved IP addresses for an NTP
+     * @return Observable of detailed long[] containing most important parts of the actual NTP response
+     * See RESPONSE_INDEX_ prefixes in {@link SntpClient} for details
+     */
+    public Flowable<long[]> initializeNtp(List<InetAddress> resolvedNtpAddresses) {
+        return Flowable.fromIterable(resolvedNtpAddresses)
+               .compose(performNtpAlgorithm());
+    }
+
+    /**
+     * Transformer that takes in a pool of NTP addresses
+     * Against each IP host we issue a UDP call and retrieve the best response using the NTP algorithm
+     */
+    private FlowableTransformer<InetAddress, long[]> performNtpAlgorithm() {
+        return new FlowableTransformer<InetAddress, long[]>() {
             @Override
-            public Observable<String> call(Observable<String> ntpPoolObservable) {
-                return ntpPoolObservable//
-                      .observeOn(Schedulers.io())//
-                      .flatMap(new Func1<String, Observable<InetAddress>>() {
+            public Flowable<long[]> apply(Flowable<InetAddress> inetAddressObservable) {
+                return inetAddressObservable
+                      .map(new Function<InetAddress, String>() {
                           @Override
-                          public Observable<InetAddress> call(String ntpPoolAddress) {
-                              try {
-                                  TrueLog.d(TAG, "---- resolving ntpHost : " + ntpPoolAddress);
-                                  return Observable.from(InetAddress.getAllByName(ntpPoolAddress));
-                              } catch (UnknownHostException e) {
-                                  return Observable.error(e);
-                              }
-                          }
-                      })//
-                      .map(new Func1<InetAddress, String>() {
-                          @Override
-                          public String call(InetAddress inetAddress) {
-                              TrueLog.d(TAG, "---- resolved address [" + inetAddress + "]");
+                          public String apply(InetAddress inetAddress) {
                               return inetAddress.getHostAddress();
+                          }
+                      })
+                      .flatMap(bestResponseAgainstSingleIp(5))  // get best response from querying the ip 5 times
+                      .take(5)                                  // take 5 of the best results
+                      .toList()
+                      .toFlowable()
+                      .filter(new Predicate<List<long[]>>() {
+                          @Override
+                          public boolean test(List<long[]> longs) throws Exception {
+                              return longs.size() > 0;
+                          }
+                      })
+                      .map(filterMedianResponse())
+                      .doOnNext(new Consumer<long[]>() {
+                          @Override
+                          public void accept(long[] ntpResponse) {
+                              cacheTrueTimeInfo(ntpResponse);
+                              saveTrueTimeInfoToDisk();
                           }
                       });
             }
         };
     }
 
-    private Func1<String, Observable<long[]>> bestResponseAgainstSingleIp(final int repeatCount) {
-        return new Func1<String, Observable<long[]>>() {
+    private FlowableTransformer<String, InetAddress> resolveNtpPoolToIpAddresses() {
+        return new FlowableTransformer<String, InetAddress>() {
             @Override
-            public Observable<long[]> call(String singleIp) {
-                return Observable.just(singleIp)//
-                      .repeat(repeatCount)//
-                      .flatMap(new Func1<String, Observable<long[]>>() {
+            public Publisher<InetAddress> apply(Flowable<String> ntpPoolFlowable) {
+                return ntpPoolFlowable
+                      .observeOn(Schedulers.io())
+                      .flatMap(new Function<String, Flowable<InetAddress>>() {
                           @Override
-                          public Observable<long[]> call(final String singleIpHostAddress) {
-                              return Observable//
-                                    .fromCallable(new Callable<long[]>() {
+                          public Flowable<InetAddress> apply(String ntpPoolAddress) {
+                              try {
+                                  TrueLog.d(TAG, "---- resolving ntpHost : " + ntpPoolAddress);
+                                  return Flowable.fromArray(InetAddress.getAllByName(ntpPoolAddress));
+                              } catch (UnknownHostException e) {
+                                  return Flowable.error(e);
+                              }
+                          }
+                      });
+            }
+        };
+    }
+
+    private Function<String, Flowable<long[]>> bestResponseAgainstSingleIp(final int repeatCount) {
+        return new Function<String, Flowable<long[]>>() {
+            @Override
+            public Flowable<long[]> apply(String singleIp) {
+                return Flowable
+                      .just(singleIp)
+                      .repeat(repeatCount)
+                      .flatMap(new Function<String, Flowable<long[]>>() {
+                          @Override
+                          public Flowable<long[]> apply(final String singleIpHostAddress) {
+                              return Flowable.create(new FlowableOnSubscribe<long[]>() {
+                                      @Override
+                                      public void subscribe(@NonNull FlowableEmitter<long[]> o)
+                                          throws Exception {
+
+                                          TrueLog.d(TAG,
+                                              "---- requestTime from: " + singleIpHostAddress);
+                                          try {
+                                              o.onNext(requestTime(singleIpHostAddress));
+                                              o.onComplete();
+                                          } catch (IOException e) {
+                                              if (!o.isCancelled()) {
+                                                  o.onError(e);
+                                              }
+                                          }
+                                      }
+                                  }, BackpressureStrategy.BUFFER)
+                                      .subscribeOn(Schedulers.io())
+                                    .doOnError(new Consumer<Throwable>() {
                                         @Override
-                                        public long[] call() throws Exception {
-                                            TrueLog.d(TAG, "---- requestTime from: " + singleIpHostAddress);
-                                            return requestTime(singleIpHostAddress);
-                                        }
-                                    })//
-                                    .subscribeOn(Schedulers.io())//
-                                    .doOnError(new Action1<Throwable>() {
-                                        @Override
-                                        public void call(Throwable throwable) {
+                                        public void accept(Throwable throwable) {
                                             TrueLog.e(TAG, "---- Error requesting time", throwable);
                                         }
-                                    })//
+                                    })
                                     .retry(_retryCount);
                           }
-                      })//
-                      .toList()//
-                      .onErrorResumeNext(Observable.<List<long[]>>empty())
+                      })
+                      .toList()
+                      .toFlowable()
                       .map(filterLeastRoundTripDelay()); // pick best response for each ip
             }
         };
     }
 
-    private Func1<List<long[]>, long[]> filterLeastRoundTripDelay() {
-        return new Func1<List<long[]>, long[]>() {
+    private Function<List<long[]>, long[]> filterLeastRoundTripDelay() {
+        return new Function<List<long[]>, long[]>() {
             @Override
-            public long[] call(List<long[]> responseTimeList) {
+            public long[] apply(List<long[]> responseTimeList) {
                 Collections.sort(responseTimeList, new Comparator<long[]>() {
                     @Override
                     public int compare(long[] lhsParam, long[] rhsLongParam) {
@@ -175,10 +240,10 @@ public class TrueTimeRx
         };
     }
 
-    private Func1<List<long[]>, long[]> filterMedianResponse() {
-        return new Func1<List<long[]>, long[]>() {
+    private Function<List<long[]>, long[]> filterMedianResponse() {
+        return new Function<List<long[]>, long[]>() {
             @Override
-            public long[] call(List<long[]> bestResponses) {
+            public long[] apply(List<long[]> bestResponses) {
                 Collections.sort(bestResponses, new Comparator<long[]>() {
                     @Override
                     public int compare(long[] lhsParam, long[] rhsParam) {

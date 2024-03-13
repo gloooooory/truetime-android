@@ -2,7 +2,7 @@
 
 ![TrueTime](truetime.png "TrueTime for Android")
 
-*Make sure to check out our counterpart too: [TrueTime](https://github.com/instacart/TrueTime.swift), an SNTP library for Swift.*
+*Make sure to check out our counterpart too: [TrueTime](https://github.com/instacart/TrueTime.swift), an NTP library for Swift.*
 
 NTP client for Android. Calculate the date and time "now" impervious to manual changes to device clock time.
 
@@ -12,11 +12,13 @@ Users may do this for a variety of reasons, like being in different timezones, t
 
 You can read more about the use case in our [blog post](https://tech.instacart.com/truetime/).
 
+In a [recent conference talk](https://vimeo.com/190922794), we explained how the full NTP implementation works with Rx. Check the [video](https://vimeo.com/190922794) and [slides](https://speakerdeck.com/kaushikgopal/learning-rx-by-example-2?slide=31) out for implementation details.
+
 # How is TrueTime calculated?
 
 It's pretty simple actually. We make a request to an NTP server that gives us the actual time. We then establish the delta between device uptime and uptime at the time of the network response. Each time "now" is requested subsequently, we account for that offset and return a corrected `Date` object.
 
-Also, once we have this information it's valid until the next time you boot your device. This means if you enable the disk caching feature, after a single successfull NTP request you can use the information on disk directly without ever making another network request. This applies even across application kills which can happen frequently if your users have a memory starved device.
+Also, once we have this information it's valid until the next time you boot your device. This means if you enable the disk caching feature, after a single successful NTP request you can use the information on disk directly without ever making another network request. This applies even across application kills which can happen frequently if your users have a memory starved device.
 
 # Installation
 
@@ -66,7 +68,7 @@ If you're down to using [RxJava](https://github.com/ReactiveX/RxJava) then we go
 
 ```java
 TrueTimeRx.build()
-        .initializeRx("0.north-america.pool.ntp.org")
+        .initializeRx("time.google.com")
         .subscribeOn(Schedulers.io())
         .subscribe(date -> {
             Log.v(TAG, "TrueTime was initialized and we have a time: " + date);
@@ -96,10 +98,43 @@ TrueTimeRx.now(); // return a Date object with the "true" time.
 * You can read up on Wikipedia the differences between [SNTP](https://en.wikipedia.org/wiki/Network_Time_Protocol#SNTP) and [NTP](https://www.meinbergglobal.com/english/faq/faq_37.htm).
 * TrueTime is also [available for iOS/Swift](https://github.com/instacart/truetime.swift)
 
-## Exception handling:
+## Troubleshooting/Exception handling:
 
-* an `InvalidNtpServerResponseException` is thrown every time the server gets an invalid response (this can happen with the individual SNTP calls).
-* If TrueTime fails to initialize (because of the above exception being throw), then an `IllegalStateException` is thrown if you try to call `TrueTime.now()` at a later point.
+When you execute the TrueTime initialization, you are very highly likely to get an `InvalidNtpServerResponseException` because of root delay violation or  root dispersion violation the first time. This is an expected occurrence as per the [NTP Spec](https://tools.ietf.org/html/rfc5905) and needs to be handled.
+
+### Why does this happen?
+
+The NTP protocol works on [UDP](https://en.wikipedia.org/wiki/User_Datagram_Protocol): 
+
+> It has no handshaking dialogues, and thus exposes the user's program to any unreliability of the underlying network and so there is no guarantee of delivery, ordering, or duplicate protection
+>
+> UDP is suitable for purposes where error checking and correction is either not necessary or is *performed in the application*, avoiding the overhead of such processing at the network interface level. Time-sensitive applications often use UDP because dropping packets is preferable to waiting for delayed packets, which may not be an option in a real-time system
+
+([Wikipedia's page](https://en.wikipedia.org/wiki/User_Datagram_Protocol), emphasis our own)
+
+This means it is highly plausible that we get faulty data packets. These are caught by the library and surfaced to the api consumer as an `InvalidNtpServerResponseException`. See this [portion of the code](https://github.com/instacart/truetime-android/blob/master/library/src/main/java/com/instacart/library/truetime/SntpClient.java#L137) for the various checks that we guard against.
+
+These guards are *extremely* important to guarantee accurate time and cannot be avoided.
+
+
+### How do I handle or protect against this in my application?
+
+It's pretty simple:
+
+* keep retrying the request, until you get a successful one. Yes it does happen eventually :)
+* Try picking a better NTP pool server. In our experience `time.apple.com` has worked best
+
+Or if you want the library to just handle that, use the Rx-ified version of the library (note the -rx suffix):
+
+```
+    compile 'com.github.instacart.truetime-android:library-extension-rx:<release-version>'
+```
+
+With TrueTimeRx, we go the whole nine yards and implement the complete NTP Spec (we resolve the DNS for the provided NTP host to single IP addresses, shoot multiple requests to that single IP, guard against the above mentioned checks, retry every single failed request, filter the best response and persist that to disk). If you don't use TrueTimeRx, you don't get these benefits.
+
+We welcome PRs for folks who wish to replicate the functionality in the vanilla TrueTime version. _We don't have plans of re-implementing that functionality atm_ in the vanilla/simple version of TrueTime.
+
+Do also note, if TrueTime fails to initialize (because of the above exception being thrown), then an `IllegalStateException` is thrown if you try to request an actual date via `TrueTime.now()`.
 
 # License
 
