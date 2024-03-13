@@ -9,15 +9,22 @@ import android.widget.Toast;
 
 import com.instacart.library.truetime.TrueTimeRx;
 
+import io.reactivex.android.schedulers.AndroidSchedulers;
+import io.reactivex.functions.Action;
+import io.reactivex.functions.Consumer;
+import io.reactivex.schedulers.Schedulers;
+
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.TimeZone;
 
+
 import butterknife.BindView;
 import butterknife.ButterKnife;
 import butterknife.OnClick;
+
 
 public class Sample2Activity
       extends AppCompatActivity {
@@ -35,7 +42,39 @@ public class Sample2Activity
         getSupportActionBar().setTitle("TrueTimeRx");
 
         ButterKnife.bind(this);
+
+        refreshBtn.setEnabled(false);
+
+        //TrueTimeRx.clearCachedInfo(this);
+
+        TrueTimeRx.build()
+              .withConnectionTimeout(31_428)
+              .withRetryCount(100)
+              .withSharedPreferences(this)
+              .withLoggingEnabled(true)
+              .initializeRx("time.google.com")
+              .subscribeOn(Schedulers.io())
+              .observeOn(AndroidSchedulers.mainThread())
+              .subscribe(new Consumer<Date>() {
+                  @Override
+                  public void accept(Date date) {
+                      onBtnRefresh();
+                  }
+              }, new Consumer<Throwable>() {
+                  @Override
+                  public void accept(Throwable throwable) {
+                      Log.e(TAG, "something went wrong when trying to initializeRx TrueTime",
+                          throwable);
+                  }
+              }, new Action() {
+                  @Override
+                  public void run() throws Exception {
+                      refreshBtn.setEnabled(true);
+                  }
+              });
+
         refreshBtn.setEnabled(TrueTimeRx.isInitialized());
+
     }
 
     @OnClick(R.id.tt_btn_refresh)

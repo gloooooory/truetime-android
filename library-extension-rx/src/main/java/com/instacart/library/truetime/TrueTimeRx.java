@@ -1,26 +1,40 @@
 package com.instacart.library.truetime;
 
 import android.content.Context;
+
+import io.reactivex.Flowable;
+import io.reactivex.FlowableTransformer;
+
 import io.reactivex.BackpressureStrategy;
 import io.reactivex.Flowable;
 import io.reactivex.FlowableEmitter;
 import io.reactivex.FlowableOnSubscribe;
 import io.reactivex.FlowableTransformer;
 import io.reactivex.Single;
+
 import io.reactivex.annotations.NonNull;
 import io.reactivex.functions.Consumer;
 import io.reactivex.functions.Function;
 import io.reactivex.functions.Predicate;
 import io.reactivex.schedulers.Schedulers;
+
 import java.io.IOException;
+
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
+
+import java.util.concurrent.Callable;
 import org.reactivestreams.Publisher;
+
+
+import org.reactivestreams.Publisher;
+
 
 public class TrueTimeRx
       extends TrueTime {
@@ -84,6 +98,17 @@ public class TrueTimeRx
      *
      * @return accurate NTP Date
      */
+
+    public Flowable<Date> initializeRx(String ntpPoolAddress) {
+        return initializeNtp(ntpPoolAddress)
+            .map(new Function<long[], Date>() {
+            @Override
+            public Date apply(long[] longs) {
+                return now();
+            }
+        });
+    }
+
     public Single<Date> initializeRx(String ntpPoolAddress) {
         return isInitialized()
                 ? Single.just(now())
@@ -107,7 +132,8 @@ public class TrueTimeRx
      * @return Observable of detailed long[] containing most important parts of the actual NTP response
      * See RESPONSE_INDEX_ prefixes in {@link SntpClient} for details
      */
-    public Single<long[]> initializeNtp(String ntpPool) {
+
+    public Flowable<long[]> initializeNtp(String ntpPool) {
         return Flowable
               .just(ntpPool)
               .compose(resolveNtpPoolToIpAddresses())
@@ -126,10 +152,11 @@ public class TrueTimeRx
      * @return Observable of detailed long[] containing most important parts of the actual NTP response
      * See RESPONSE_INDEX_ prefixes in {@link SntpClient} for details
      */
-    public Single<long[]> initializeNtp(List<InetAddress> resolvedNtpAddresses) {
-        return Flowable.fromIterable(resolvedNtpAddresses)
-               .compose(performNtpAlgorithm())
-               .firstOrError();
+
+    public Flowable<long[]> initializeNtp(List<InetAddress> resolvedNtpAddresses) {
+        return Flowable
+              .fromIterable(resolvedNtpAddresses)
+              .compose(performNtpAlgorithm());
     }
 
     /**
@@ -172,10 +199,10 @@ public class TrueTimeRx
     private FlowableTransformer<String, InetAddress> resolveNtpPoolToIpAddresses() {
         return new FlowableTransformer<String, InetAddress>() {
             @Override
-            public Publisher<InetAddress> apply(Flowable<String> ntpPoolFlowable) {
+            public Flowable<InetAddress> apply(Flowable<String> ntpPoolFlowable) {
                 return ntpPoolFlowable
                       .observeOn(Schedulers.io())
-                      .flatMap(new Function<String, Flowable<InetAddress>>() {
+                      .flatMap(new Function<String, Publisher<InetAddress>>() {
                           @Override
                           public Flowable<InetAddress> apply(String ntpPoolAddress) {
                               try {
@@ -197,25 +224,18 @@ public class TrueTimeRx
                 return Flowable
                       .just(singleIp)
                       .repeat(repeatCount)
-                      .flatMap(new Function<String, Flowable<long[]>>() {
+                      .flatMap(new Function<String, Publisher<long[]>>() {
                           @Override
                           public Flowable<long[]> apply(final String singleIpHostAddress) {
-                              return Flowable.create(new FlowableOnSubscribe<long[]>() {
-                                      @Override
-                                      public void subscribe(@NonNull FlowableEmitter<long[]> o)
-                                          throws Exception {
-
-                                          TrueLog.d(TAG,
-                                              "---- requestTime from: " + singleIpHostAddress);
-                                          try {
-                                              o.onNext(requestTime(singleIpHostAddress));
-                                              o.onComplete();
-                                          } catch (IOException e) {
-                                              o.tryOnError(e);
-                                          }
-                                      }
-                                  }, BackpressureStrategy.BUFFER)
-                                      .subscribeOn(Schedulers.io())
+                              return Flowable
+                                    .fromCallable(new Callable<long[]>() {
+                                        @Override
+                                        public long[] call() throws Exception {
+                                            TrueLog.d(TAG, "---- requestTime from: " + singleIpHostAddress);
+                                            return requestTime(singleIpHostAddress);
+                                        }
+                                    })
+                                    .subscribeOn(Schedulers.io())
                                     .doOnError(new Consumer<Throwable>() {
                                         @Override
                                         public void accept(Throwable throwable) {
@@ -227,6 +247,7 @@ public class TrueTimeRx
                       })
                       .toList()
                       .toFlowable()
+                      .onErrorReturnItem(new ArrayList<long[]>())
                       .map(filterLeastRoundTripDelay()); // pick best response for each ip
             }
         };

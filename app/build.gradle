@@ -35,6 +35,7 @@ dependencies {
     implementation project(path: ':library-extension-rx')
 //    compile 'com.github.instacart.truetime-android:library-extension-rx:master-SNAPSHOT'
 
+    testCompile 'junit:junit:4.12'
     implementation 'com.android.support:appcompat-v7:27.1.1'
     implementation 'com.android.support.constraint:constraint-layout:1.1.3'
     implementation "com.jakewharton:butterknife:$butterknifeVersion"
