@@ -16,7 +16,7 @@ public class TrueTime {
 
     private static float _rootDelayMax = 100;
     private static float _rootDispersionMax = 100;
-    private static int _serverResponseDelayMax = 200;
+    private static int _serverResponseDelayMax = 750;
     private static int _udpSocketTimeoutInMillis = 30_000;
 
     private String _ntpHost = "1.us.pool.ntp.org";
@@ -45,22 +45,32 @@ public class TrueTime {
         return INSTANCE;
     }
 
-    public static void clearCachedInfo(Context context) {
-        DISK_CACHE_CLIENT.clearCachedInfo(context);
-    }
-
     public void initialize() throws IOException {
         initialize(_ntpHost);
-        saveTrueTimeInfoToDisk();
     }
 
     /**
      * Cache TrueTime initialization information in SharedPreferences
      * This can help avoid additional TrueTime initialization on app kills
      */
-    public synchronized TrueTime withSharedPreferences(Context context) {
-        DISK_CACHE_CLIENT.enableDiskCaching(context);
+    public synchronized TrueTime withSharedPreferencesCache(Context context) {
+        DISK_CACHE_CLIENT.enableCacheInterface(new SharedPreferenceCacheImpl(context));
         return INSTANCE;
+    }
+
+    /**
+     * Customized TrueTime Cache implementation.
+     */
+    public synchronized TrueTime withCustomizedCache(CacheInterface cacheInterface) {
+        DISK_CACHE_CLIENT.enableCacheInterface(cacheInterface);
+        return INSTANCE;
+    }
+
+    /**
+     * clear the cached TrueTime info on device reboot.
+     */
+    public static void clearCachedInfo() {
+        DISK_CACHE_CLIENT.clearCachedInfo();
     }
 
     public synchronized TrueTime withConnectionTimeout(int timeoutInMillis) {
@@ -116,6 +126,7 @@ public class TrueTime {
         }
 
         requestTime(ntpHost);
+        saveTrueTimeInfoToDisk();
     }
 
     long[] requestTime(String ntpHost) throws IOException {
