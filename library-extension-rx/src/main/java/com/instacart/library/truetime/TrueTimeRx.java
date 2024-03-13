@@ -1,13 +1,25 @@
 package com.instacart.library.truetime;
 
 import android.content.Context;
+
 import io.reactivex.Flowable;
 import io.reactivex.FlowableTransformer;
+
+import io.reactivex.BackpressureStrategy;
+import io.reactivex.Flowable;
+import io.reactivex.FlowableEmitter;
+import io.reactivex.FlowableOnSubscribe;
+import io.reactivex.FlowableTransformer;
+import io.reactivex.Single;
+
 import io.reactivex.annotations.NonNull;
 import io.reactivex.functions.Consumer;
 import io.reactivex.functions.Function;
 import io.reactivex.functions.Predicate;
 import io.reactivex.schedulers.Schedulers;
+
+import java.io.IOException;
+
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
@@ -16,7 +28,11 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
+
 import java.util.concurrent.Callable;
+import org.reactivestreams.Publisher;
+
+
 import org.reactivestreams.Publisher;
 
 
@@ -32,13 +48,37 @@ public class TrueTimeRx
         return RX_INSTANCE;
     }
 
-    public TrueTimeRx withSharedPreferences(Context context) {
-        super.withSharedPreferences(context);
+    public TrueTimeRx withSharedPreferencesCache(Context context) {
+        super.withSharedPreferencesCache(context);
+        return this;
+    }
+
+    /**
+     * Provide your own cache interface to cache the true time information.
+     * @param cacheInterface the customized cache interface to save the true time data.
+     */
+    public TrueTimeRx withCustomizedCache(CacheInterface cacheInterface) {
+        super.withCustomizedCache(cacheInterface);
         return this;
     }
 
     public TrueTimeRx withConnectionTimeout(int timeout) {
         super.withConnectionTimeout(timeout);
+        return this;
+    }
+
+    public TrueTimeRx withRootDelayMax(float rootDelay) {
+        super.withRootDelayMax(rootDelay);
+        return this;
+    }
+
+    public TrueTimeRx withRootDispersionMax(float rootDispersion) {
+        super.withRootDispersionMax(rootDispersion);
+        return this;
+    }
+
+    public TrueTimeRx withServerResponseDelayMax(int serverResponseDelayInMillis) {
+        super.withServerResponseDelayMax(serverResponseDelayInMillis);
         return this;
     }
 
@@ -58,6 +98,7 @@ public class TrueTimeRx
      *
      * @return accurate NTP Date
      */
+
     public Flowable<Date> initializeRx(String ntpPoolAddress) {
         return initializeNtp(ntpPoolAddress)
             .map(new Function<long[], Date>() {
@@ -67,6 +108,17 @@ public class TrueTimeRx
             }
         });
     }
+
+    public Single<Date> initializeRx(String ntpPoolAddress) {
+        return isInitialized()
+                ? Single.just(now())
+                : initializeNtp(ntpPoolAddress).map(new Function<long[], Date>() {
+                    @Override
+                    public Date apply(long[] longs) throws Exception {
+                        return now();
+                    }
+                });
+     }
 
     /**
      * Initialize TrueTime
@@ -80,11 +132,13 @@ public class TrueTimeRx
      * @return Observable of detailed long[] containing most important parts of the actual NTP response
      * See RESPONSE_INDEX_ prefixes in {@link SntpClient} for details
      */
+
     public Flowable<long[]> initializeNtp(String ntpPool) {
         return Flowable
               .just(ntpPool)
               .compose(resolveNtpPoolToIpAddresses())
-              .compose(performNtpAlgorithm());
+              .compose(performNtpAlgorithm())
+              .firstOrError();
     }
 
     /**
@@ -98,6 +152,7 @@ public class TrueTimeRx
      * @return Observable of detailed long[] containing most important parts of the actual NTP response
      * See RESPONSE_INDEX_ prefixes in {@link SntpClient} for details
      */
+
     public Flowable<long[]> initializeNtp(List<InetAddress> resolvedNtpAddresses) {
         return Flowable
               .fromIterable(resolvedNtpAddresses)
@@ -122,14 +177,14 @@ public class TrueTimeRx
                       .flatMap(bestResponseAgainstSingleIp(5))  // get best response from querying the ip 5 times
                       .take(5)                                  // take 5 of the best results
                       .toList()
+                      .toFlowable()
                       .filter(new Predicate<List<long[]>>() {
                           @Override
-                          public boolean test(@NonNull List<long[]> longs) throws Exception {
-                              return longs != null && longs.size() > 0;
+                          public boolean test(List<long[]> longs) throws Exception {
+                              return longs.size() > 0;
                           }
                       })
                       .map(filterMedianResponse())
-                      .toFlowable()
                       .doOnNext(new Consumer<long[]>() {
                           @Override
                           public void accept(long[] ntpResponse) {

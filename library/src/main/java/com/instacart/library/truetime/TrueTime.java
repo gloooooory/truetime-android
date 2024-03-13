@@ -4,6 +4,7 @@ import android.content.Context;
 import android.os.SystemClock;
 import java.io.IOException;
 import java.util.Date;
+import java.util.Locale;
 
 public class TrueTime {
 
@@ -13,6 +14,9 @@ public class TrueTime {
     private static final DiskCacheClient DISK_CACHE_CLIENT = new DiskCacheClient();
     private static final SntpClient SNTP_CLIENT = new SntpClient();
 
+    private static float _rootDelayMax = 100;
+    private static float _rootDispersionMax = 100;
+    private static int _serverResponseDelayMax = 750;
     private static int _udpSocketTimeoutInMillis = 30_000;
 
     private String _ntpHost = "1.us.pool.ntp.org";
@@ -41,26 +45,65 @@ public class TrueTime {
         return INSTANCE;
     }
 
-    public static void clearCachedInfo(Context context) {
-        DISK_CACHE_CLIENT.clearCachedInfo(context);
-    }
-
     public void initialize() throws IOException {
         initialize(_ntpHost);
-        saveTrueTimeInfoToDisk();
     }
 
     /**
      * Cache TrueTime initialization information in SharedPreferences
      * This can help avoid additional TrueTime initialization on app kills
      */
-    public synchronized TrueTime withSharedPreferences(Context context) {
-        DISK_CACHE_CLIENT.enableDiskCaching(context);
+    public synchronized TrueTime withSharedPreferencesCache(Context context) {
+        DISK_CACHE_CLIENT.enableCacheInterface(new SharedPreferenceCacheImpl(context));
         return INSTANCE;
+    }
+
+    /**
+     * Customized TrueTime Cache implementation.
+     */
+    public synchronized TrueTime withCustomizedCache(CacheInterface cacheInterface) {
+        DISK_CACHE_CLIENT.enableCacheInterface(cacheInterface);
+        return INSTANCE;
+    }
+
+    /**
+     * clear the cached TrueTime info on device reboot.
+     */
+    public static void clearCachedInfo() {
+        DISK_CACHE_CLIENT.clearCachedInfo();
     }
 
     public synchronized TrueTime withConnectionTimeout(int timeoutInMillis) {
         _udpSocketTimeoutInMillis = timeoutInMillis;
+        return INSTANCE;
+    }
+
+    public synchronized TrueTime withRootDelayMax(float rootDelayMax) {
+        if (rootDelayMax > _rootDelayMax) {
+          String log = String.format(Locale.getDefault(),
+              "The recommended max rootDelay value is %f. You are setting it at %f",
+              _rootDelayMax, rootDelayMax);
+          TrueLog.w(TAG, log);
+        }
+
+        _rootDelayMax = rootDelayMax;
+        return INSTANCE;
+    }
+
+    public synchronized TrueTime withRootDispersionMax(float rootDispersionMax) {
+      if (rootDispersionMax > _rootDispersionMax) {
+        String log = String.format(Locale.getDefault(),
+            "The recommended max rootDispersion value is %f. You are setting it at %f",
+            _rootDispersionMax, rootDispersionMax);
+        TrueLog.w(TAG, log);
+      }
+
+      _rootDispersionMax = rootDispersionMax;
+      return INSTANCE;
+    }
+
+    public synchronized TrueTime withServerResponseDelayMax(int serverResponseDelayInMillis) {
+        _serverResponseDelayMax = serverResponseDelayInMillis;
         return INSTANCE;
     }
 
@@ -83,10 +126,15 @@ public class TrueTime {
         }
 
         requestTime(ntpHost);
+        saveTrueTimeInfoToDisk();
     }
 
     long[] requestTime(String ntpHost) throws IOException {
-        return SNTP_CLIENT.requestTime(ntpHost, _udpSocketTimeoutInMillis);
+        return SNTP_CLIENT.requestTime(ntpHost,
+            _rootDelayMax,
+            _rootDispersionMax,
+            _serverResponseDelayMax,
+            _udpSocketTimeoutInMillis);
     }
 
     synchronized static void saveTrueTimeInfoToDisk() {
@@ -107,7 +155,7 @@ public class TrueTime {
                                   : DISK_CACHE_CLIENT.getCachedDeviceUptime();
 
         if (cachedDeviceUptime == 0L) {
-            throw new RuntimeException("expected SNTP time from last boot to be cached. couldn't find it.");
+            throw new RuntimeException("expected device time from last boot to be cached. couldn't find it.");
         }
 
         return cachedDeviceUptime;
